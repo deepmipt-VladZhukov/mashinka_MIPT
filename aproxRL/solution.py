@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import gym
 import math
 import random
@@ -8,15 +7,16 @@ import matplotlib.pyplot as plt
 from collections import namedtuple
 from itertools import count
 from copy import deepcopy
+%matplotlib inline
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.autograd import Variable
-import torchvision.transforms as T
-%matplotlib inline
 
-env = gym.make('LunarLander-v2')
+
+env = gym.make('LunarLander-v2')#LunarLander-v2
 
 # set up matplotlib
 is_ipython = 'inline' in matplotlib.get_backend()
@@ -31,7 +31,6 @@ FloatTensor = torch.cuda.FloatTensor if use_cuda else torch.FloatTensor
 LongTensor = torch.cuda.LongTensor if use_cuda else torch.LongTensor
 ByteTensor = torch.cuda.ByteTensor if use_cuda else torch.ByteTensor
 Tensor = FloatTensor
-
 # %%
 
 Transition = namedtuple('Transition',
@@ -58,45 +57,49 @@ class ReplayMemory(object):
     def __len__(self):
         return len(self.memory)
 
+
 class DQN(nn.Module):
-    def __init__(self, action_n):
+    def __init__(self, env_n, action_n):
         super(DQN, self).__init__()
         self.out_size = action_n
-        hidden_size = 8
-        self.dense1 = nn.Linear(8, hidden_size)
-        self.nl1 = nn.Sigmoid()
+        hidden_size = 64
+        self.dense1 = nn.Linear(env_n, hidden_size)
+        self.nl1 = nn.ReLU()
         self.dense2 = nn.Linear(hidden_size, self.out_size)
         self.sm = nn.Softmax()
 
     def forward(self, x):
+        # print(x)
+        # if len(x.data.shape) < 2:
+        #     x = x.view(1, -1)
         out = self.dense1(x)
         out = self.nl1(out)
         out = self.dense2(out)
-        return out
-# %%
+        return out.view(x.size(0), -1)
+
 env.reset()
 
 action_n = env.action_space.n
 
-BATCH_SIZE = 20
-GAMMA = 0.999
-EPS_START = 0.9
+BATCH_SIZE = 100
+GAMMA = 0.9
+EPS_START = 0.99
 EPS_END = 0.05
 EPS_DECAY = 200
 
-model = DQN(action_n)
+model = DQN(env.observation_space.shape[0], action_n)
 list(model.parameters())
 if use_cuda:
     model.cuda()
 
-optimizer = optim.RMSprop(model.parameters())
-memory = ReplayMemory(200)
+optimizer = optim.Adamax(model.parameters())
+memory = ReplayMemory(10000)
 
 
 steps_done = 0
 model_actions = []
 
-def select_action(state):
+def select_action(state, model):
     global steps_done
     sample = random.random()
     eps_threshold = EPS_END + (EPS_START - EPS_END) * \
@@ -104,10 +107,10 @@ def select_action(state):
     steps_done += 1
     if sample > eps_threshold:
         # print(Variable(FloatTensor(state), volatile=True).type(FloatTensor).data.max(0)[1])
-        act = model(Variable(FloatTensor(state), volatile=True).type(FloatTensor)).data.max(0)[1].view(1, 1)
+        act = model(Variable(FloatTensor(state), volatile=True).type(FloatTensor)).data.max(1)[1].view(1, 1)
         return act
     else:
-        return LongTensor([[random.randrange(2)]])
+        return LongTensor([[random.randrange(env.action_space.n)]])
 
 episode_durations = []
 last_sync = 0
@@ -124,10 +127,11 @@ def optimize_model():
     batch = Transition(*zip(*transitions))
     non_final_mask = ByteTensor(tuple(map(lambda s: s is not None,
                                           batch.next_state)))
-    non_final_next_states = Variable(torch.stack([s for s in batch.next_state
+    non_final_next_states = Variable(torch.cat([s for s in batch.next_state
                                                 if s is not None]),
                                      volatile=True)
-    state_batch = Variable(torch.stack(batch.state))
+    # print(Variable(torch.cat(batch.state)))
+    state_batch = Variable(torch.cat(batch.state))
     action_batch = Variable(torch.cat(batch.action))
     reward_batch = Variable(torch.cat(batch.reward))
     state_action_values = model(state_batch).gather(1, action_batch)
@@ -137,7 +141,7 @@ def optimize_model():
     # Compute the expected Q values
     expected_state_action_values = (next_state_values * GAMMA) + reward_batch
     tmp = (state_action_values, expected_state_action_values)
-    loss = loss_l(state_action_values, expected_state_action_values)
+    loss = F.mse_loss(state_action_values, expected_state_action_values)
     # print(loss)
     # Optimize the model
     optimizer.zero_grad()
@@ -147,17 +151,18 @@ def optimize_model():
     #     # param.grad.data.clamp_(-1, 1)
     optimizer.step()
 # %%
-num_episodes = 50
-rwrds = []
+num_episodes = 300
+mean_by_episode_reward = []
 for i_episode in range(num_episodes):
-    state = FloatTensor(env.reset())
+    rwrds = []
+    state = FloatTensor([env.reset()])
     for t in count():
-        action = select_action(state)
+        action = select_action(state, model)
         st, reward, done, _ = env.step(action[0, 0])
         rwrds.append(reward)
         reward = Tensor([reward])
         if not done:
-            next_state = FloatTensor(st)
+            next_state = FloatTensor([st])
         else:
             next_state = None
 
@@ -166,17 +171,46 @@ for i_episode in range(num_episodes):
         optimize_model()
         if done:
             episode_durations.append(t + 1)
+            mean_by_episode_reward.append(np.mean(rwrds))
+            print(np.mean(rwrds))
             # plot_durations()
             break
-
 print('Complete')
 env.render(close=True)
 env.close()
 plt.ioff()
 plt.show()
+
+#%%
+print(LongTensor([[random.randrange(env.action_space.n)]]))
 # %%
-plt.plot(episode_durations)
+plt.plot(mean_by_episode_reward)
 plt.show()
-# plt.plot(all_loss)
-# plt.show()
+# %%
+# plt.plotall_loss
+plt.plot(all_loss)
+plt.show()
 # print(tmp)
+# %%
+env.close()
+num_episodes = 100
+mean_by_episode_reward = []
+for i_episode in range(num_episodes):
+    rwrds = []
+    state = FloatTensor([env.reset()])
+    for t in count():
+        action =model(Variable(FloatTensor(state), volatile=True).type(FloatTensor)).data.max(1)[1].view(1, 1)
+        st, reward, done, _ = env.step(action[0, 0])
+        rwrds.append(reward)
+        reward = Tensor([reward])
+        if not done:
+            next_state = FloatTensor([st])
+        else:
+            next_state = None
+        state = next_state
+        if done:
+            episode_durations.append(t + 1)
+            mean_by_episode_reward.append(np.mean(rwrds))
+            print(np.mean(rwrds))
+            # plot_durations()
+            break
